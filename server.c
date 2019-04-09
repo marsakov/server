@@ -8,6 +8,8 @@
 #include <sys/socket.h> 
 #include <netinet/in.h> 
 #include <sys/time.h>
+#include <pthread.h>
+#include <regex.h>
 	
 #define TRUE 1 
 #define FALSE 0 
@@ -35,6 +37,7 @@ int				current_sd;
 client_info		client_socket[30];
 int				max_clients = 30;
 char			*message = "Hello from SERVER\n";
+int				start = 0;
 
 int 	ip_exist(unsigned long new_ip)
 {
@@ -62,6 +65,21 @@ sockets_ip *find_elem(int id)
 	return (0);
 }
 
+sockets_ip *find_IP(char *ip)
+{
+	sockets_ip *st = statistic;
+	struct in_addr addr;
+	
+	while (st)
+	{
+		addr.s_addr = st->ip;
+		if (!strcmp(inet_ntoa(addr), ip))
+			return (st);
+		st = st->next;
+	}
+	return (0);
+}
+
 void	show()
 {
 	sockets_ip *st = statistic;
@@ -81,11 +99,9 @@ void	add_new(unsigned long new_ip)
 	sockets_ip *sprev;
 	sockets_ip *snext;
 	sockets_ip *st = statistic;
-	printf("0\n");
 
 	if (!statistic)
 	{
-		printf("666\n");
 		statistic = malloc(sizeof(sockets_ip));
 		statistic->next = 0;
 		statistic->prev = 0;
@@ -98,11 +114,8 @@ void	add_new(unsigned long new_ip)
 	}
 	if (st->ip > new_ip)
 	{
-		printf("1\n");
 		snext = st;
-		printf("2\n");
 		st = malloc(sizeof(sockets_ip));
-		printf("3\n");
 		st->next = snext;
 		st->id = current_client;
 		st->ip = new_ip;
@@ -112,10 +125,8 @@ void	add_new(unsigned long new_ip)
 		st->next->prev = st;
 		statistic = st;
 		current_client++;
-		printf("4\n");
 		return ;
 	}
-	printf("5\n");
 	while (st->next && st->next->ip < new_ip)
 		st = st->next;
 	snext = st->next;
@@ -133,6 +144,44 @@ void	add_new(unsigned long new_ip)
 	current_client++;
 }
 
+void *cli(void *vargp) 
+{
+	char				cmd[100];
+	char				*ip;
+	regex_t				regex;
+	regmatch_t			matches[4];
+	sockets_ip			*st;
+
+	ip = malloc(sizeof(char) * 16);
+	printf("CLI thread_id\n");
+	while (1)
+	{
+		gets(cmd);
+		if (!regcomp(&regex, "\\s*start\\s*", 0) && !regexec(&regex, cmd, 0, NULL, 0)) {
+			printf("START\n");
+			start = 1;
+		}
+		else if (!regcomp(&regex, "\\s*stop\\s*", 0) && !regexec(&regex, cmd, 0, NULL, 0)) {
+			printf("STOP\n");
+			start = 0;
+		}
+		else if (!regcomp(&regex, "(show )([0-9]{1,3}\\.[0-9]{1,3}\\.[0-9]{1,3}\\.[0-9]{1,3})( count)", REG_EXTENDED) && !regexec(&regex, cmd, 0, NULL, 0)) {
+			strncpy(ip, cmd + 5, strchr(cmd + 5, ' ') - cmd - 5);
+			st = find_IP(ip);			
+			printf("packets = %d | bytes = %d\n", st->packets, st->bytes);
+
+		}
+		else if (!regcomp(&regex, "\\s*stat\\s*", 0) && !regexec(&regex, cmd, 0, NULL, 0)) {
+			show();
+		}
+		else if (!regcomp(&regex, "\\s*--help\\s*", 0) && !regexec(&regex, cmd, 0, NULL, 0)) 
+			printf("start\t\t\t(packets are being sniffed)\nstop\t\t\t(packets are not sniffed)\nshow [ip] count\t\t(print number of packets received from ip address)\nstat\t\t\tshow all collected statistics\n--help\t\t\t(show usage information)\n");
+		else
+			printf("INVALID CMD\n");
+	}
+	return NULL; 
+} 
+
 int main(int argc , char *argv[]) 
 { 
 	int					opt = TRUE;
@@ -142,16 +191,22 @@ int main(int argc , char *argv[])
 	char				buffer[1025];
 	fd_set				readfds;
 	int					id_ip;
+	struct timeval		timeout;
+	pthread_t			thread_id;
 
+	start = 0;
 	current_client = 0;
 	current_sd = 0;
+	timeout.tv_sec = 0;
+  	timeout.tv_usec = 500000;
 
 	for (int i = 0; i < max_clients; i++)
 	{
 		client_socket[i].sd = 0;
 		client_socket[i].id = 0;
 	}
-		
+	
+	pthread_create(&thread_id, NULL, cli, NULL);
 
 	if (!(master_socket = socket(AF_INET, SOCK_STREAM, 0))) 
 	{ 
@@ -185,10 +240,10 @@ int main(int argc , char *argv[])
 	} 
 
 	addrlen = sizeof(address);
-	puts("Waiting for connections ...");
 		
 	while (TRUE) 
 	{
+
 		FD_ZERO(&readfds);
 		FD_SET(master_socket, &readfds);
 		max_sd = master_socket;
@@ -201,12 +256,15 @@ int main(int argc , char *argv[])
 			if (sd > max_sd) 
 				max_sd = sd;
 		} 
-	
-		activity = select( max_sd + 1, &readfds, NULL, NULL, NULL);
-		if (activity < 0 && errno != EINTR) 
-			printf("select error");
+
+		if (start)
+		{
+			activity = select( max_sd + 1, &readfds, NULL, NULL, NULL);
+			if (activity < 0 && errno != EINTR) 
+				printf("select error");
+		}
 			
-		if (FD_ISSET(master_socket, &readfds)) 
+		if (start && FD_ISSET(master_socket, &readfds)) 
 		{ 
 			if ((new_socket = accept(master_socket, (struct sockaddr *)&address, (socklen_t*)&addrlen)) < 0) 
 			{
@@ -235,7 +293,7 @@ int main(int argc , char *argv[])
 			current_sd++;
 		}
 			
-		for (int i = 0; i < current_sd; i++) 
+		for (int i = 0; start && i < current_sd; i++) 
 		{ 
 			sd = client_socket[i].sd;
 				
@@ -250,20 +308,19 @@ int main(int argc , char *argv[])
 				} 
 				else
 				{
-					// printf("\t[%lu]\n", statistic[current_client].ip);
 					buffer[valread] = '\0';
 					send(sd, buffer, strlen(buffer), 0 );
 					sockets_ip *s = find_elem(client_socket[i].id);
-					if (!s)
-						printf("----!s-----\n");
-					s->packets++;
-					s->bytes += strlen(buffer) - 1;
-					printf("\t\tFROM %lu RECV %d packets\ttotal bytes = %d\n", s->ip, s->packets, s->bytes);
-					show();
+					if (s)
+					{
+						s->packets++;
+						s->bytes += strlen(buffer) - 1;
+					}
 				} 
 			} 
 		} 
 	}
+	pthread_join(thread_id, NULL); 
 		
 	return 0;
 } 
